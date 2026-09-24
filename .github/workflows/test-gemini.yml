@@ -11,7 +11,7 @@ jobs:
     timeout-minutes: 3
 
     steps:
-      - name: Test Korean summary
+      - name: Check available models
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         shell: bash
@@ -21,101 +21,69 @@ jobs:
           import os
           import sys
           import urllib.error
+          import urllib.parse
           import urllib.request
 
           key = os.environ.get("GEMINI_API_KEY", "").strip()
           if not key:
-              print("FAILED: GEMINI_API_KEY Secret is missing or empty.")
+              print("FAILED: GEMINI_API_KEY Secret is missing.")
               sys.exit(1)
 
-          model = "gemini-2.5-flash-lite"
-          url = (
-              "https://generativelanguage.googleapis.com/v1beta/"
-              f"models/{model}:generateContent"
-          )
-
-          prompt = """
-          아래는 실제 뉴스가 아닌 테스트용 가상 제품 설명입니다.
-          주어진 내용만 사용해 다음 형식으로 한국어로 작성하세요.
-
-          제목: 한국어 제목
-          요약: 한국어 2문장
-
-          가격과 출시일 등 없는 정보는 추가하지 마세요.
-          가상 제품이라는 점을 요약에 명시하세요.
-
-          Title: Example Audio announces Sample One headphones
-          Description: This fictional product has noise cancellation
-          and up to 30 hours of battery life. The company has not
-          announced its price or release date.
-          """
-
-          payload = {
-              "contents": [
-                  {"role": "user", "parts": [{"text": prompt}]}
-              ],
-              "generationConfig": {
-                  "temperature": 0.2,
-                  "maxOutputTokens": 512
-              }
-          }
-
-          request = urllib.request.Request(
-              url,
-              data=json.dumps(payload).encode("utf-8"),
-              headers={
-                  "Content-Type": "application/json",
-                  "x-goog-api-key": key
-              },
-              method="POST"
-          )
+          names = []
+          page_token = ""
 
           try:
-              with urllib.request.urlopen(request, timeout=60) as response:
-                  result = json.load(response)
+              while True:
+                  params = {"pageSize": 1000}
+                  if page_token:
+                      params["pageToken"] = page_token
+
+                  url = (
+                      "https://generativelanguage.googleapis.com/"
+                      "v1beta/models?"
+                      + urllib.parse.urlencode(params)
+                  )
+
+                  request = urllib.request.Request(
+                      url,
+                      headers={"x-goog-api-key": key}
+                  )
+
+                  with urllib.request.urlopen(
+                      request, timeout=30
+                  ) as response:
+                      result = json.load(response)
+
+                  for model in result.get("models", []):
+                      methods = model.get(
+                          "supportedGenerationMethods", []
+                      )
+                      if "generateContent" in methods:
+                          names.append(model["name"])
+
+                  page_token = result.get("nextPageToken", "")
+                  if not page_token:
+                      break
+
           except urllib.error.HTTPError as error:
-              explanations = {
-                  400: "Check API key validity and request settings.",
-                  401: "Authentication failed. Check the API key.",
-                  403: "Access denied. Check project permissions or region.",
-                  404: "Model or endpoint is unavailable.",
-                  429: "Quota or rate limit reached. Do not enable billing.",
-                  500: "Temporary Google server error.",
-                  503: "Model temporarily unavailable."
-              }
               print(f"FAILED: HTTP {error.code}")
-              print(explanations.get(error.code, "API request failed."))
+              print("Model list request failed.")
               sys.exit(1)
           except (urllib.error.URLError, TimeoutError):
               print("FAILED: Network connection or timeout error.")
               sys.exit(1)
           except ValueError:
-              print("FAILED: API response was not valid JSON.")
+              print("FAILED: Invalid JSON response.")
               sys.exit(1)
 
-          candidates = result.get("candidates", [])
-          if not candidates:
-              print("FAILED: No response candidate was returned.")
+          print("=== AVAILABLE MODELS ===")
+          for name in sorted(set(names)):
+              print(name.replace(key, "[REDACTED]"))
+          print("=== END ===")
+
+          if not names:
+              print("FAILED: No generateContent models returned.")
               sys.exit(1)
 
-          candidate = candidates[0]
-          parts = candidate.get("content", {}).get("parts", [])
-          text = "\n".join(
-              part.get("text", "")
-              for part in parts
-              if not part.get("thought", False)
-          ).strip()
-
-          if not text:
-              print("FAILED: No summary text was returned.")
-              sys.exit(1)
-
-          if candidate.get("finishReason") != "STOP":
-              print("FAILED: Response did not finish normally.")
-              sys.exit(1)
-
-          print("SUCCESS: Gemini API connection completed.")
-          print("Model:", model)
-          print("--- Korean summary ---")
-          print(text.replace(key, "[REDACTED]"))
+          print("SUCCESS: Model list retrieved.")
           PY
